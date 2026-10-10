@@ -1,193 +1,163 @@
-name: RDP
+name: RDP + Sunshine + Moonlight
+
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  cloud-gaming:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      # ─────────────────────────────────────────────
-      # 1. LIBERAR ESPACIO Y MONTAR DISCO EXTRA
-      # ─────────────────────────────────────────────
-      - name: Free Up Space & Mount Extra Disk
+      - name: Configure RDP
+        shell: pwsh
         run: |
-          Write-Host "=== Disk before cleanup ===" -ForegroundColor Cyan
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free | Format-Table
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 2
 
-          $toRemove = @(
-            "$env:SystemDrive\hostedtoolcache\windows\Ruby",
-            "$env:SystemDrive\hostedtoolcache\windows\go",
-            "$env:SystemDrive\hostedtoolcache\windows\Python",
-            "$env:ProgramFiles\dotnet",
-            "$env:ProgramFiles\MongoDB",
-            "$env:ProgramFiles\PostgreSQL",
-            "$env:ProgramFiles (x86)\Google\Chrome",
-            "$env:ProgramFiles\Mozilla Firefox"
-          )
-          foreach ($path in $toRemove) {
-            if (Test-Path $path) {
-              Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "Removed: $path" -ForegroundColor Green
-            }
-          }
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
 
-          Write-Host "=== Disk D: info ===" -ForegroundColor Cyan
-          Get-PSDrive D -ErrorAction SilentlyContinue
-
-          $vhdPath = "D:\extra_disk.vhdx"
-          New-VHD -Path $vhdPath -SizeBytes 100GB -Dynamic -ErrorAction SilentlyContinue
-          Mount-VHD -Path $vhdPath
-          $disk = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Online' -and $_.PartitionStyle -eq 'RAW' } | Select-Object -Last 1
-          if ($disk) {
-            Initialize-Disk -Number $disk.Number -PartitionStyle MBR -PassThru |
-              New-Partition -AssignDriveLetter -UseMaximumSize |
-              Format-Volume -FileSystem NTFS -NewFileSystemLabel "ExtraDisk" -Confirm:$false
-          }
-
-          Write-Host "=== Disk after setup ===" -ForegroundColor Cyan
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free | Format-Table
-
-          "EXTRA_DISK=E:" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "STORAGE_ROOT=D:\storage" | Out-File -FilePath $env:GITHUB_ENV -Append
-          New-Item -ItemType Directory -Force -Path "D:\storage" | Out-Null
-
-      # ─────────────────────────────────────────────
-      # 3. CONFIGURAR RDP
-      # ─────────────────────────────────────────────
-      - name: Configure RDP Settings
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 0 -Force
-
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service -Name TermService -Force
-          Write-Host "RDP configured." -ForegroundColor Green
-
-      # ─────────────────────────────────────────────
-      # 4. CREAR USUARIO RDP
-      # ─────────────────────────────────────────────
       - name: Create RDP User
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $charSet = @{
-            Upper   = [char[]](65..90)
-            Lower   = [char[]](97..122)
-            Number  = [char[]](48..57)
-            Special = [char[]]@(33,35,36,37,38,42,43,45,61,64)
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Configure o secret RDP_PASSWORD"
           }
-          $rawPassword  = @()
-          $rawPassword += $charSet.Upper   | Get-Random -Count 4
-          $rawPassword += $charSet.Lower   | Get-Random -Count 4
-          $rawPassword += $charSet.Number  | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
 
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators"        -Member "RDP" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users"  -Member "RDP" -ErrorAction SilentlyContinue
+          $secure = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            Write-Error "User creation failed"; exit 1
+            New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
           }
 
-          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "RDP user created." -ForegroundColor Green
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
 
-      # ─────────────────────────────────────────────
-      # 5. INSTALAR TAILSCALE
-      # ─────────────────────────────────────────────
       - name: Install Tailscale
+        shell: pwsh
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installer -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i","`"$installer`"","/quiet","/norestart" -Wait
-          Remove-Item $installer -Force
+          $release = Invoke-RestMethod "https://api.github.com/repos/tailscale/tailscale/releases/latest"
 
-      # ─────────────────────────────────────────────
-      # 6. CONECTAR TAILSCALE
-      # ─────────────────────────────────────────────
+          $asset = $release.assets |
+            Where-Object { $_.name -match 'windows-amd64\.msi$' } |
+            Select-Object -First 1
+
+          if ($asset) {
+            $installer = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest $asset.browser_download_url -OutFile $installer
+          } else {
+            $installer = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $installer
+          }
+
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
+          if ($p.ExitCode -notin @(0,3010)) {
+            throw "Falha na instalação do Tailscale: $($p.ExitCode)"
+          }
+
       - name: Connect Tailscale
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          if (-not $env:TS_AUTHKEY) {
+            throw "Configure o secret TAILSCALE_AUTH_KEY"
+          }
+
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          & $ts up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 15) {
-            Start-Sleep -Seconds 4
-            $tsIP = & $ts ip -4 2>$null
-            $retries++
+          & $ts up --authkey="$env:TS_AUTHKEY" --hostname="gh-gta-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao conectar Tailscale"
           }
 
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
+          $ip = & $ts ip -4
+          if (-not $ip) {
+            throw "IP Tailscale não encontrado"
+          }
 
-      # ─────────────────────────────────────────────
-      # 7. VERIFICAR RDP
-      # ─────────────────────────────────────────────
+          "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "IP Tailscale: $ip"
+
+      - name: Install Sunshine
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod "https://api.github.com/repos/LizardByte/Sunshine/releases/latest"
+
+          $asset = $release.assets |
+            Where-Object { $_.name -eq "Sunshine-Windows-AMD64-installer.msi" } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            throw "Instalador Sunshine não encontrado"
+          }
+
+          $installer = "$env:TEMP\sunshine.msi"
+          Invoke-WebRequest $asset.browser_download_url -OutFile $installer
+
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
+
+          if ($p.ExitCode -notin @(0,3010)) {
+            throw "Falha ao instalar Sunshine: $($p.ExitCode)"
+          }
+
+          Write-Host "Sunshine instalado!"
+
+      - name: Configure Sunshine Firewall
+        shell: pwsh
+        run: |
+          $ports = @(
+            @{port="47984-47990";protocol="TCP"},
+            @{port="48010";protocol="TCP"},
+            @{port="47998-48010";protocol="UDP"}
+          )
+
+          foreach ($item in $ports) {
+            netsh advfirewall firewall add rule name="Sunshine-Tailscale-$($item.protocol)-$($item.port)" dir=in action=allow protocol=$($item.protocol) localport=$($item.port) remoteip=100.64.0.0/10
+          }
+
+      - name: Start Sunshine
+        shell: pwsh
+        run: |
+          $service = Get-Service -Name "SunshineService" -ErrorAction SilentlyContinue
+
+          if ($service) {
+            Start-Service -Name "SunshineService" -ErrorAction SilentlyContinue
+            Write-Host "Serviço Sunshine iniciado"
+          } else {
+            Write-Host "Sunshine instalado, mas serviço não encontrado."
+            Write-Host "Pode ser necessário iniciá-lo na sessão gráfica."
+          }
+
       - name: Verify RDP
+        shell: pwsh
         run: |
-          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $test.TcpTestSucceeded) {
-            Write-Error "RDP port 3389 not reachable"; exit 1
+          $result = Test-NetConnection -ComputerName 127.0.0.1 -Port 3389
+
+          if (-not $result.TcpTestSucceeded) {
+            throw "RDP não está escutando na porta 3389"
           }
-          Write-Host "RDP reachable on port 3389 ✓" -ForegroundColor Green
 
-      # ─────────────────────────────────────────────
-      # 8. VERIFICAR APLICACIONES INSTALADAS
-      # ─────────────────────────────────────────────
-      - name: Verify Installed Apps
+          Write-Host "RDP disponível"
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "Usuário: RDP"
+
+      - name: Maintain Connection
+        shell: pwsh
         run: |
-          Write-Host ""
-          Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-          Write-Host "║         VERIFICATION REPORT                      ║" -ForegroundColor Cyan
-          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
-          
-          Write-Host "║  NODE.JS:" -NoNewline
-          try { node --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
-          
-          Write-Host "║  NPM:    " -NoNewline
-          try { npm --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
-          
-          Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Cyan
-          Write-Host ""
+          Write-Host "================================="
+          Write-Host "VM GTA V + SUNSHINE"
+          Write-Host "================================="
+          Write-Host "RDP: $env:TAILSCALE_IP"
+          Write-Host "Usuario: RDP"
+          Write-Host "Sunshine: https://localhost:47990"
+          Write-Host "================================="
 
-      # ─────────────────────────────────────────────
-      # 9. MANTENER SESIÓN ACTIVA
-      # ─────────────────────────────────────────────
-      - name: Keep Alive & Show Credentials
-        run: |
-          Write-Host ""
-          Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-          Write-Host "║         RDP ACCESS INFO                          ║" -ForegroundColor Cyan
-          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
-          Write-Host "║  IP:       $env:TAILSCALE_IP"
-          Write-Host "║  User:     RDP"
-          Write-Host "║  Password: $env:RDP_PASSWORD"
-          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
-          Write-Host "║  STORAGE                                         ║" -ForegroundColor Cyan
-          Write-Host "║  C: ~14GB (sistema)                              ║"
-          Write-Host "║  D: ~70GB (runner disk)                          ║"
-          Write-Host "║  E: ~100GB (VHD extra)                           ║"
-          Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Cyan
-          Write-Host ""
-
-          # Mantener la sesión activa
-          $i = 0
           while ($true) {
-            Start-Sleep -Seconds 60
-            $i++
-            Write-Host "Keep alive... ($i minutos)" -ForegroundColor DarkGray
+            Write-Host "[$(Get-Date)] VM ativa"
+            Start-Sleep -Seconds 300
           }
-          
